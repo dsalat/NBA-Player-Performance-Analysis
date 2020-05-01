@@ -1,0 +1,173 @@
+---
+title: "NBA Salary Performance Analysis"
+author: "Dirshe Salat"
+date: "5/1/2020"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(readr)
+library(ballr)
+library(dplyr)
+library(e1071)
+library(corrplot)
+library(glmnet)
+```
+
+## Reading in the data
+
+```{r reading in the data}
+# Player salaries
+salaryData <- read_csv("NBA_season1718_salary.csv")
+
+# Player per game metrics
+gameData <- NBAPerGameStatistics()
+```
+
+```{r salary data preview}
+salaryData
+```
+
+```{r game data preview}
+gameData
+```
+
+## Data preprocessing
+
+For the players data I can omit some of the columns that are not required for this analyis since I am ony concerend with player's performance metrics, namely, "rk", "pos" and "tm". I use the corresponding column indices to remove them.
+
+Next, the salary and the game datasets are combined into a single dataset.
+
+```{r data preprocessing}
+gameData <- gameData %>% select(c(c(2),c(8:(ncol(gameData)-1)))) %>% group_by(player) %>% summarise_all(mean)
+salaryData <- salaryData %>% rename(salary = season17_18, player = Player)  %>% select(player, salary)
+merged <- merge(gameData, salaryData, by="player")
+```
+
+
+## Basic Model
+
+I perform a basic linear regression to test the asumption that the salary is a function of one or more of the attributes of the player's performance metrics.
+```{r model}
+formula <- as.formula(paste(c(paste(colnames(merged)[2:(ncol(merged) - 1)], collapse=" + "), "salary"), collapse = " ~ "))
+lm.model <- lm(salary ~ .,  data = merged %>% select(-player))  
+summary(lm.model)
+```
+
+P Value for the model is very small indicating that the correlation is statistically significnat. Significant variables are fg, x2p, drb, trb, ast, pf 
+
+```{r model pruning}
+lm.model <- lm(salary ~ fg + x2p + drb + trb + ast + pf, data = merged %>% select(-player))
+summary(lm.model)
+```
+A RMSE Function
+```{r rmse of basic model}
+rmse <- function(error)
+{
+  sqrt(mean(error^2))
+}
+
+rmse(lm.model$residuals)
+```
+
+```{r model metrics, echo=FALSE}
+lm.plot <- plot(lm.model)
+```
+
+
+Let's also observe the relationship of the individual chosen predictor with salary
+
+```{r predictors, echo=F}
+p1 <- plot(merged$fg, merged$salary)
+p2 <- plot(merged$x2p, merged$salary)
+p2 <- plot(merged$drb, merged$salary)
+p2 <- plot(merged$trb, merged$salary)
+p2 <- plot(merged$ast, merged$salary)
+p2 <- plot(merged$pf, merged$salary)
+```
+
+Since most of the predictors have a non linear relationship, I can attempt to use polynomial regression
+
+## Polynomial regression
+
+```{r polynomial regressin}
+poly.model <- lm(salary ~ poly(fg, 2) + poly(x2p, 3) + poly(drb, 3) + poly(trb, 3) + ast + poly(pf, 2), data = merged %>% select(-player))
+```
+
+```{r poly model rmse}
+rmse(poly.model$residuals)
+```
+
+Thus, the polynmial regression results in an error which is slightly better than the standard linear regression.
+
+Let's also observe the colinearity between the independent variables.
+
+```{r correlation plot}
+data.predict_subset <- merged %>% select(fg, x2p, drb, trb, ast, pf)
+data.y <- merged$salary
+
+merged.cor <- cor(merged %>% select(fg, x2p, drb, trb, ast, pf))
+corrplot(merged.cor)
+```
+
+
+From the plot, I can observe that there is high colinearity betwween the predictors. I can attempt a ridge regression which can better handle data with multi-colinearity.
+
+## Ridge and lasso regression
+
+```{r ridge regression}
+ridge.model <- glmnet(as.matrix(data.predict_subset), data.y, alpha = 0)
+
+cv.out <- cv.glmnet(as.matrix(data.predict_subset), data.y)
+ridge.predictions<- predict(ridge.model, s = cv.out$lambda.min, newx = as.matrix(data.predict_subset))
+rmse(ridge.predictions - data.y)
+```
+
+```{r lasso regression}
+lasso.model <- glmnet(as.matrix(data.predict_subset), data.y, alpha = 1)
+lasso.predictions <- predict(lasso.model, s = cv.out$lambda.min, newx = as.matrix(data.predict_subset))
+rmse(lasso.predictions - data.y)
+```
+
+The errors in ridge and lasso regressions do not show any improvement over linear regression, unfortunately.
+
+## SVR Model using my impact variables
+
+```{r SVR model}
+svr.model <- svm(salary ~ fg + x2p + drb + trb + ast + pf, data = merged %>% select(-player))
+svr.model
+```
+
+```{r svr model attributes}
+svr.model.rmse <- rmse(svr.model$residuals)
+svr.model.rmse
+```
+
+## Predictions
+
+The plot below shows the predicted values against the actual values. Althogh there is a possibility of improving the fit by using a more complex model, it still captures the idea that the performance metrics do have some correlation with players' salaries.
+
+```{r predictions}
+plot(predict(svr.model), merged$salary, xlab="predicted", ylab="actual")
+abline(a=0,b=1)
+```
+
+## Outliers
+
+In this sections I figure out outliers, i.e players who's salaries signidicantly deviate from what would be expected from my model.
+
+```{r outliers}
+predicted <- predict(svr.model)
+differences <- ((predicted - merged$salary) / predicted)
+differences.sd <- sd(differences)
+differences.mean <- mean(differences)
+outliers <- (differences > (differences.mean + 1.5 * differences.sd)) | (differences < (differences.mean - 1.5 * differences.sd))
+salaryData$player[outliers]
+```
+In this section I figure out players who are close matches or are within my model
+
+```{r close matches}
+close_matches <- (differences < (differences.mean + 0.1 * differences.sd)) & (differences > (differences.mean - 0.1 * differences.sd))
+salaryData$player[close_matches]
+```
